@@ -1,3 +1,4 @@
+import { discoverInferenceApis } from "./lib/discovery.mjs";
 import { createServer } from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -67,6 +68,7 @@ function validTimeZone(timeZone) {
 
 const dataHome = process.env.XDG_DATA_HOME || path.join(homedir(), ".local", "share");
 const config = {
+  autoDiscover: process.env.SPARK_SCOPE_AUTO_DISCOVER === "1",
   host: process.env.SPARK_SCOPE_HOST || "127.0.0.1",
   port: portNumber("SPARK_SCOPE_PORT", 8787),
   apiUrl: inferenceUrl("SPARK_SCOPE_API_URL", "http://127.0.0.1:8000"),
@@ -87,7 +89,7 @@ const nodeDefinitions = topology.nodes.map((node) => ({ ...node, interfaces: nod
 
 // One inference API per model server: those listed under "servers" in topology.json, or SPARK_SCOPE_API_URL for every
 // node. The first server's sessions keep the ledger's plain keys; the others prefix their id (see usage-store.mjs).
-const servers = topologyServers(topology, config.apiUrl).map((server, index) => ({
+let servers = topologyServers(topology, config.apiUrl).map((server, index) => ({
   ...server,
   collector: new InferenceCollector(server.api),
   keyPrefix: index === 0 ? "" : `${server.id}:`,
@@ -103,6 +105,7 @@ try {
   console.error(`${usageOpenError} (${config.usageDbPath})`);
 }
 const unavailableUsage = () => ({ persistent: false, error: usageOpenError, updatedAt: new Date().toISOString() });
+const configuredServers = [...servers];
 const state = {
   status: "starting",
   message: STARTING_MESSAGE,
@@ -268,8 +271,38 @@ async function collectServer(index) {
   }
 }
 
+let discoveringInference = false;
+let lastDiscovery = 0;
+async function refreshDiscovery() {
+      try {
+        const found = await discoverInferenceApis(config.port);
+        const old = new Map(servers.map((server, index) => [server.id, { server, state: state.servers[index] }]));
+        const wanted = found.length ? found : configuredServers;
+        servers = wanted.map((item) => old.get(item.id)?.server ?? {
+          ...item, nodes: item.nodes ?? topology.nodes.map((node) => node.id),
+          collector: new InferenceCollector(item.api), keyPrefix: `${item.id}:`, lastServedModel: null,
+        });
+        for (const item of wanted) servers.find((server) => server.id === item.id).name = item.name;
+        state.servers = servers.map(({ id, name, nodes, implicit }) => ({
+          ...(old.get(id)?.state ?? { inference: null, serving: null, inferenceState: "unknown" }),
+          id, name, nodes, implicit: Boolean(implicit),
+        }));
+        state.discovery = { enabled: true, detected: found.length, updatedAt: new Date().toISOString(), error: null };
+      } catch (error) {
+        state.discovery = { enabled: true, error: "API discovery unavailable", updatedAt: new Date().toISOString() };
+        console.error(`API discovery: ${error.message}`);
+      }
+
+}
 function collectInference() {
-  return Promise.all(servers.map((server, index) => collectServer(index)));
+  if (discoveringInference) return Promise.resolve();
+  const poll = () => Promise.all(servers.map((server, index) => collectServer(index)));
+  if (config.autoDiscover && Date.now() - lastDiscovery >= 10_000 && servers.every((server) => !server.collecting)) {
+    lastDiscovery = Date.now();
+    discoveringInference = true;
+    return refreshDiscovery().finally(() => { discoveringInference = false; }).then(poll);
+  }
+  return poll();
 }
 
 const contentTypes = new Map([

@@ -59,8 +59,8 @@ function renderNode(meta,node,root=$('#nodes')) {
   const target=meta.local?t('node.target.local'):meta.host??t('node.target.noHost');
   set('title',meta.name);set('role',[roleName(meta.role),meta.hardware].filter(Boolean).join(' | '));
   // With several model servers, the server this node serves in, in that server's colour.
-  const tag=el.querySelector('[data-server-tag]'),server=servers.length>1?serverOfNode(servers,meta.id):null;tag.hidden=!server;if(server){tag.textContent=serverName(server);tag.style.setProperty('--server',serverColor(server))}
-  const state=pending?'notCollected':!ok?'noResponse':node.gpu?.available===false?'noGpuData':node.inferenceProcessReady?'serving':'idle';
+  const tag=el.querySelector('[data-server-tag]'),server=servers.length>1?serverOfNode(settings.servers==='one'?[pickedServer(servers,settings.server)]:servers,meta.id):null;tag.hidden=!server;if(server){tag.textContent=serverName(server);tag.style.setProperty('--server',serverColor(server))}
+  const state=pending?'notCollected':!ok?'noResponse':node.gpu?.available===false?'noGpuData':serverOfNode(settings.servers==='one'?[pickedServer(servers,settings.server)]:servers,meta.id)?.inference?.loading?'loading':node.inferenceProcessReady?(serverOfNode(settings.servers==='one'?[pickedServer(servers,settings.server)]:servers,meta.id)?.inference?.ok?'serving':'processRunning'):'idle';
   set('state',t(`node.badge.${state}`));el.querySelector('.badge').dataset.level=BADGE_LEVELS[state]??'idle';
   set('connection',pending?t('node.connection.notCollected',{target}):ok?`${target} | ${fixed(node.latencyMs,0)} ms`:t('node.connection.statusUnknown',{target}));
   // GPU load: the figure with a small "%", and --load for the designs that draw it as a ring or a bar.
@@ -140,7 +140,7 @@ function renderLegend(kind,nodes) {
   $('#'+kind+'-legend').innerHTML=metas.map((meta,index)=>{const node=nodes?.[meta.id];const value=!node?.ok?unknown():kind==='temp'?temperature(node.gpu?.temperature,settings.temp):memory(node.memory?.availableBytes,settings.mem);return `<span style="color:${nodeColor(settings.colors,index)}">${esc(meta.name)} <b class="num">${value}</b></span>`}).join('');
 }
 function renderToday(usage) {
-  document.querySelectorAll('[data-usage]').forEach(el=>{const key=el.dataset.usage;const value=usage?.error||usage?.reported?.[key]===false?null:usage?.today?.[key];el.textContent=key==='requests'?fixed(value,0):compact(value);el.title=finite(value)?value.toLocaleString('en-US'):''});
+  document.querySelectorAll('[data-usage]').forEach(el=>{const key=el.dataset.usage;const value=latest?.inference?.metricsAvailable===false||usage?.error||usage?.reported?.[key]===false?null:usage?.today?.[key];el.textContent=key==='requests'?fixed(value,0):compact(value);el.title=finite(value)?value.toLocaleString('en-US'):''});
   document.querySelectorAll('[data-ledger-zone]').forEach(el=>{el.textContent=ledgerTimeZone?t('ledger.zone',{timeZone:ledgerTimeZone}):''});
 }
 function renderState(state) {
@@ -151,15 +151,15 @@ function renderState(state) {
 function drawState(state) {
   latest=state;shown=state;lastTopology=state.topology??lastTopology;
   if(state.usage?.timeZone&&state.usage.timeZone!==ledgerTimeZone){ledgerTimeZone=state.usage.timeZone;if(!monthPicked&&selectedMonth!==ledgerToday().slice(0,7)){selectedMonth=ledgerToday().slice(0,7);monthLoadedAt=0;rebuildMonths();if(!$('#tokens').hidden)void refreshMonth(true)}}
-  servers=modelServers(state);syncNodes(nodeOrder(state));$('#shell').classList.remove('stale');
+  servers=modelServers(state);renderApiTabs(state);renderLoadingProgress(state);syncNodes(nodeOrder(state));$('#shell').classList.remove('stale');
   const v=state.inference,stopped=state.inferenceState==='stopped',nodes=state.nodes||{},several=servers.length>1,focus=viewInference(state,settings);
   const online=metas.filter(m=>nodes[m.id]?.ok).length,serving=metas.filter(m=>nodes[m.id]?.ok&&nodes[m.id]?.inferenceProcessReady).length,count=metas.length;
-  $('.status').className='status '+(state.status==='healthy'?'':stopped?'stopped':'error');text('#status-title',serverText(state.messageKey,state.messageParams,state.message)||t('statusbar.checkingStatus'));
+  $('.status').className='status '+(state.status==='healthy'||state.status==='loading'?'':stopped?'stopped':'error');text('#status-title',serverText(state.messageKey,state.messageParams,state.message)||t('statusbar.checkingStatus'));
   const watts=metas.map(m=>nodes[m.id]).filter(n=>n?.ok&&finite(n.gpu?.powerWatts)).map(n=>n.gpu.powerWatts);
-  $('#status-desc').innerHTML=`<span>${t('statusbar.nodes',{online,count})}</span><span>${t('statusbar.processes',{serving,count})}</span><span>${several?t('statusbar.apis',{answering:servers.filter(server=>server.inference?.ok).length,count:servers.length}):t(v?.ok?'statusbar.apiUp':'statusbar.apiNoResponse')}</span>${watts.length?`<span>${t('statusbar.gpuPower',{watts:fixed(watts.reduce((sum,w)=>sum+w,0),1)})}${watts.length<count?` ${t('statusbar.gpuPowerPartial',{reporting:watts.length,count})}`:''}</span>`:''}`;
+  $('#status-desc').innerHTML=`<span>${t('statusbar.nodes',{online,count})}</span><span>${t('statusbar.processes',{serving,count})}</span><span>${several?t('statusbar.apis',{answering:servers.filter(server=>server.inference?.ok).length,count:servers.length}):t(v?.loading?'statusbar.apiLoading':v?.ok?'statusbar.apiUp':'statusbar.apiNoResponse')}</span>${watts.length?`<span>${t('statusbar.gpuPower',{watts:fixed(watts.reduce((sum,w)=>sum+w,0),1)})}${watts.length<count?` ${t('statusbar.gpuPowerPartial',{reporting:watts.length,count})}`:''}</span>`:''}`;
   text('#updated-at',clock(state.updatedAt));
-  if(several){const names=servers.map(serverName).join(' | ');text('#model-title',names);text('#model-meta',t('header.servers',{count:servers.length,nodes:count}));document.title=`${names} | Spark Scope`}
-  else{text('#model-title',v?.modelName||t(stopped?'header.inferenceStopped':'header.modelUnknown'));text('#model-meta',serving?t('header.engineRunning',{engine:state.serving?.engine??t('header.engineFallback'),count:serving}):t('header.liveMonitor',{count}));document.title=v?.modelName?`${v.modelName} | Spark Scope`:'Spark Scope'}
+  if(several){const chosen=pickedServer(servers,settings.server),names=settings.servers==='one'?serverName(chosen):servers.map(serverName).join(' | ');text('#model-title',names);text('#model-meta',t('header.servers',{count:servers.length,nodes:count}));document.title=`${names} | Spark Scope`}
+  else{text('#model-title',v?.modelName||(v?.loading?serverName(servers[0]):null)||t(stopped?'header.inferenceStopped':'header.modelUnknown'));text('#model-meta',v?.loading?t('header.engineLoading',{engine:state.serving?.engine??t('header.engineFallback'),count:serving}):serving?t('header.engineRunning',{engine:state.serving?.engine??t('header.engineFallback'),count:serving}):t('header.liveMonitor',{count}));document.title=v?.modelName?`${v.modelName} | Spark Scope`:'Spark Scope'}
   // The big figure and the legend follow the total over the servers, or the picked one in "one at a time".
   const focusStopped=several&&settings.servers==='one'?pickedServer(servers,settings.server).inferenceState==='stopped':stopped;
   const empty=focusStopped?t('common.stopped'):unknown(),value=(number,formatter=fixed)=>focus?.ok?formatter(number):empty;
@@ -201,6 +201,33 @@ function fillEngine(block,v,stopped) {
 // otherwise updated in place, so a poll never takes the keyboard focus or a click away.
 const serverCell=(row,name,value)=>{const el=row.querySelector(`[data-cell="${name}"]`);if(el.textContent!==value)el.textContent=value};
 function serverState(row,key){serverCell(row,'state',key==='unknown'?unknown():t(`servers.state.${key}`));row.querySelector('[data-cell="state"]').dataset.state=key}
+function renderLoadingProgress(state) {
+  const active=pickedServer(modelServers(state),settings.server),reading=active?.inference,box=$('#model-loading');
+  box.hidden=!reading?.loading;if(box.hidden)return;
+  const bar=$('#loading-progress'),value=reading.loadingPercent;
+  if(finite(value)){bar.value=value;bar.setAttribute('aria-valuenow',String(value));}
+  else{bar.removeAttribute('value');bar.removeAttribute('aria-valuenow');}
+  text('#loading-percent',finite(value)?`${fixed(value,1)}%`:t('loading.unavailable'));
+  text('#loading-stage',value===100?t('loading.initializing'):t('loading.progressHint'));
+}
+
+function renderApiTabs(state) {
+  const box=$('#api-tabs'),list=modelServers(state);box.hidden=!state.discovery?.enabled;
+  if(box.hidden)return;
+  const pick=pickedServer(list,settings.server)?.id;
+  const key=JSON.stringify(list.map(server=>[server.id,server.name,server.inferenceState]));
+  if(box.dataset.key!==key){
+    box.dataset.key=key;
+    box.innerHTML=list.map(server=>`<button type="button" role="tab" data-api="${esc(server.id)}">${esc(serverName(server))}<small>${esc(server.inference?.loading?t('node.badge.loading'):server.inference?.ok?t('servers.state.serving'):t('servers.state.down'))}</small></button>`).join('');
+  }
+  for(const button of box.children)button.setAttribute('aria-selected',String(button.dataset.api===pick));
+  if(list.length>1&&settings.servers!=='one')settings=parseSettings({...settings,servers:'one',server:pick});
+}
+$('#api-tabs').addEventListener('click',event=>{
+  const button=event.target.closest('button[data-api]');if(!button)return;
+  const before=settings;settings=parseSettings({...settings,servers:'one',server:button.dataset.api});applySettings(changes(before));
+});
+
 function renderServers(state) {
   const box=$('#servers'),list=modelServers(state);box.hidden=list.length<2;if(list.length<2)return;
   const one=settings.servers==='one',key=`${one}|${list.map(server=>server.id).join(',')}`;
@@ -214,7 +241,7 @@ function renderServers(state) {
     const row=box.children[index],v=server.inference;
     row.querySelector('i').style.background=serverColor(server);
     serverCell(row,'name',serverName(server));serverCell(row,'nodes',t('servers.nodes',{count:server.nodes.length}));
-    serverState(row,!v?'checking':v.ok?'serving':server.inferenceState==='stopped'?'idle':'down');
+    serverState(row,!v?'checking':v.loading?'loading':v.ok?'serving':server.inferenceState==='stopped'?'idle':'down');
     serverCell(row,'output',v?.ok?`${fixed(v.outputTokensPerSecond)} tok/s`:unknown());serverCell(row,'queue',t('servers.queue',{queue:v?.ok?fixed(v.waitingRequests,0):unknown()}));
     if(one)row.setAttribute('aria-pressed',String(server.id===pick));
   });
