@@ -59,8 +59,9 @@ function renderNode(meta,node,root=$('#nodes')) {
   const target=meta.local?t('node.target.local'):meta.host??t('node.target.noHost');
   set('title',meta.name);set('role',[roleName(meta.role),meta.hardware].filter(Boolean).join(' | '));
   // With several model servers, the server this node serves in, in that server's colour.
-  const tag=el.querySelector('[data-server-tag]'),server=servers.length>1?serverOfNode(settings.servers==='one'?[pickedServer(servers,settings.server)]:servers,meta.id):null;tag.hidden=!server;if(server){tag.textContent=serverName(server);tag.style.setProperty('--server',serverColor(server))}
-  const state=pending?'notCollected':!ok?'noResponse':node.gpu?.available===false?'noGpuData':serverOfNode(settings.servers==='one'?[pickedServer(servers,settings.server)]:servers,meta.id)?.inference?.loading?'loading':node.inferenceProcessReady?(serverOfNode(settings.servers==='one'?[pickedServer(servers,settings.server)]:servers,meta.id)?.inference?.ok?'serving':'processRunning'):'idle';
+  const selected=settings.servers==='one'?pickedServer(servers,settings.server):null,ownServer=selected?.nodes?.includes(meta.id)?selected:serverOfNode(servers,meta.id);
+  const tag=el.querySelector('[data-server-tag]'),server=servers.length>1?ownServer:null;tag.hidden=!server;if(server){tag.textContent=serverName(server);tag.style.setProperty('--server',serverColor(server))}
+  const state=pending?'notCollected':!ok?'noResponse':node.gpu?.available===false?'noGpuData':ownServer?.inference?.loading?'loading':node.inferenceProcessReady?(ownServer?.inference?.ok?'serving':'processRunning'):'idle';
   set('state',t(`node.badge.${state}`));el.querySelector('.badge').dataset.level=BADGE_LEVELS[state]??'idle';
   set('connection',pending?t('node.connection.notCollected',{target}):ok?`${target} | ${fixed(node.latencyMs,0)} ms`:t('node.connection.statusUnknown',{target}));
   // GPU load: the figure with a small "%", and --load for the designs that draw it as a ring or a bar.
@@ -214,6 +215,7 @@ function renderLoadingProgress(state) {
 function renderApiTabs(state) {
   const box=$('#api-tabs'),list=modelServers(state);box.hidden=!state.discovery?.enabled;
   if(box.hidden)return;
+  if(state.discovery.detected===0){box.innerHTML=`<span>${esc(t('servers.noneDetected'))}</span>`;box.dataset.key='none';return;}
   const pick=pickedServer(list,settings.server)?.id;
   const key=JSON.stringify(list.map(server=>[server.id,server.name,server.inferenceState]));
   if(box.dataset.key!==key){
