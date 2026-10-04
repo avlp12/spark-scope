@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { listenerCandidates, probeInference } from '../lib/discovery.mjs';
-import { InferenceCollector, loadingProgress } from '../lib/collectors.mjs';
+import { InferenceCollector, loadingProgress, normalizeLlamaMetrics, parsePrometheus, metricTotal, metricsEngine } from '../lib/collectors.mjs';
 
 test('active inference CLI admits custom ports, excludes RPC and dashboard', () => {
   const listeners = ['LISTEN 0 512 192.0.2.10:18889 0.0.0.0:*', 'LISTEN 0 512 0.0.0.0:31524 0.0.0.0:*', 'LISTEN 0 512 0.0.0.0:8787 0.0.0.0:*'].join('\n');
@@ -40,4 +40,14 @@ test('loading percentages require an explicit valid engine fraction', () => {
   assert.equal(loadingProgress({loading_progress:1}).loadingPercent,100);
   for(const raw of [-1,101,Infinity,'50',null]) assert.equal(loadingProgress({progress:raw}).loadingPercent,null);
   assert.equal(loadingProgress({}).loadingPercent,null);
+});
+
+test('llama native counters preserve token accounting without invented metrics', () => {
+  const metrics=parsePrometheus('llamacpp:prompt_tokens_total 100\nllamacpp:prompt_tokens_cached_total 50\nllamacpp:tokens_predicted_total 20\nllamacpp:requests_processing 2\nllamacpp:requests_deferred 1\n');
+  assert.equal(metricsEngine(metrics),'llama.cpp');normalizeLlamaMetrics(metrics);
+  assert.equal(metricTotal(metrics,'vllm:prompt_tokens_total'),150);
+  assert.equal(metricTotal(metrics,'vllm:prompt_tokens_by_source_total',{source:'local_compute'}),100);
+  assert.equal(metricTotal(metrics,'vllm:generation_tokens_total'),20);
+  assert.equal(metricTotal(metrics,'vllm:num_requests_running'),2);
+  assert.equal(metricTotal(metrics,'vllm:request_success_total'),null);
 });
